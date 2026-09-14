@@ -11,9 +11,9 @@
 //
 // Запуск:
 //   nano-edr <журнал.log>
+#include <print>
 #include <cstdio>
 #include <fstream>
-#include <print>
 #include <string>
 
 int main(int argc, char** argv) {
@@ -23,6 +23,7 @@ int main(int argc, char** argv) {
         std::print(stderr, "использование: nano-edr <журнал.log>\n");
         return 2;
     }
+    bool quiet = (argc >= 3 && std::string(argv[2]) == "--quiet");
 
     std::ifstream log(argv[1]);
     if (!log) {
@@ -48,11 +49,26 @@ int main(int argc, char** argv) {
         }
 
         // >>> Здесь начинается занятие 1.1.
-        //
+        // 
         // Проверка признаков и печать детекта. Номер строки, который нужен
         // в выводе, — это lines.
+        if (line.find("wscript.exe") != std::string::npos) {
+            std::print("[DETECT] строка {}, признак wscript.exe: {}\n", lines, line);
+        }
+        if (line.find(".locked") != std::string::npos) {
+            std::print("[DETECT] строка {}, признак .locked: {}\n", lines, line);
+        }
+        if (line.find("certutil.exe") != std::string::npos) {
+            std::print("[DETECT] строка {}, признак certutil.exe: {}\n", lines, line);
+        }
+        if (line.find("\\Startup\\") != std::string::npos) {
+            std::print("[DETECT] строка {}, признак \\Startup\\: {}\n", lines, line);
+        }
     }
 
-    std::print("строк {}, из них комментариев {}\n", lines, comments);
+
+    if (!quiet) {
+        std::print("строк {}, из них комментариев {}\n", lines, comments);
+    }
     return 0;
 }
