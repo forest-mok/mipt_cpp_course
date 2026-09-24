@@ -1,90 +1,104 @@
-// Каркас агента: читает журнал событий построчно, считает события по типам
-// и печатает детекты.
-//
-// Запуск:
-//   nano-edr <журнал.log> [--quiet]
 #include <cstdio>
 #include <fstream>
 #include <print>
 #include <string>
-#include <utility>
 #include <vector>
+#include <utility>
 
 int main(int argc, char** argv) {
-    std::string log_path;
+
     bool quiet = false;
+    std::string path;
+
     for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "--quiet") {
+        if (std::string(argv[i]) == "--quiet") {
             quiet = true;
         } else {
-            log_path = arg;
+            path = std::string(argv[i]);
         }
-    }
 
-    if (log_path.empty()) {
+    }
+    
+    if (path.empty()) {
         std::print(stderr, "использование: nano-edr <журнал.log> [--quiet]\n");
         return 2;
     }
 
-    std::ifstream log(log_path);
+    std::ifstream log(path);
+
+    
     if (!log) {
-        std::print(stderr, "не удалось открыть журнал: {}\n", log_path);
+        std::print(stderr, "не удалось открыть журнал: {}\n", path);
         return 2;
     }
 
-    std::vector<std::string> patterns = {
-        "wscript.exe",
-        ".locked",
-        "certutil.exe",
-        "\\Startup\\"
-    };
-
-    std::vector<std::pair<std::string, int>> type_counts;
-
     long long lines = 0;
+    long long no_sign = 0;
     std::string line;
 
-    while (std::getline(log, line)) {
-        ++lines;
+    std::vector<std::string> signs;
 
-        auto pos = line.find_first_not_of(" \t");
-        if (pos == std::string::npos || line[pos] == '#' || line[pos] == ';') {
+    signs.push_back("wscript.exe");
+    signs.push_back(".locked");
+    signs.push_back("certutil.exe");
+    signs.push_back("\\Startup\\");
+
+    std::vector<std::pair<std::string, int>> typeCount;
+    
+    while (std::getline(log, line)) {
+        
+        ++lines;
+        
+        size_t ind = line.find_first_not_of(" \t");
+
+        if (ind == std::string::npos || line[ind] == '#' || line[ind] == ';') {
+            ++no_sign;
             continue;
         }
+        
+        size_t pos_type = line.find("type=");
+        if (pos_type != std::string::npos) {
 
-        auto tpos = line.find("type=");
-        std::string type;
-        if (tpos != std::string::npos) {
-            auto start = tpos + 5;
-            auto end = line.find(' ', start);
-            type = line.substr(start, end - start);
-        }
+            size_t start_num = pos_type + 5;
+            size_t end_num = line.find_first_of(" \t\r", start_num);
 
-        bool found = false;
-        for (auto& tc : type_counts) {
-            if (tc.first == type) {
-                tc.second++;
-                found = true;
-                break;
+            if (end_num == std::string::npos) {
+                end_num = line.size(); 
             }
-        }
-        if (!found) {
-            type_counts.push_back({type, 1});
-        }
 
-        for (const auto& pattern : patterns) {
-            if (line.find(pattern) != std::string::npos) {
-                std::print("[DETECT] строка {}, признак {}: {}\n", lines, pattern, line);
+            std::string type = line.substr(start_num, end_num - start_num);
+
+            bool found_type = false;
+
+            for (auto& p : typeCount) {
+                if (p.first == type) {
+                    p.second += 1;
+                    found_type = true;
+                    break;
+                }
             }
+            if (!found_type) {
+                typeCount.push_back({type,1});
+            }
+            
         }
+        for (const auto& war : signs) {
+            if (line.find(war) != std::string::npos) {
+                std::print ("[DETECT] строка {}, признак {}: {}\n", lines, war, line);
+            }
+        }   
     }
 
+    long long all_sign = lines - no_sign;
+    
     if (!quiet) {
-        for (const auto& tc : type_counts) {
-            std::print("{}: {}\n", tc.first, tc.second);
+
+        std::print("Общее число событий: {}\n", all_sign);
+
+        for (const auto& p : typeCount) {
+            std::print ("Тип: {}, Количество: {}\n", p.first, p.second); 
         }
     }
-
+    
     return 0;
 }
