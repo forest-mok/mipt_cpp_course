@@ -1,108 +1,107 @@
 #include <charconv>
 #include <cstddef>
 #include <cstdio>
+#include <exception>
 #include <fstream>
 #include <print>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "agent_rules.h"
 #include "event.h"
 #include "event_list.h"
 #include "parse.h"
+#include "rules.h"
 
-int main(int argc, char** argv) {
-
-    bool quiet = false;
+namespace {
+struct Options {
     std::string path;
-    std::size_t window_size = 64; 
+    bool quiet = false;
+    std::size_t window_size = 64;
+};
 
+bool ParseArgs(int argc, char** argv, Options& options) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
 
         if (arg == "--quiet") {
-            quiet = true;
+            options.quiet = true;
         } else if (arg == "--window-size") {
-
             if (i + 1 >= argc) {
                 std::print(stderr, "--window-size: не указано число\n");
-                return 2;
+                return false;
             }
             ++i;
             std::string value = argv[i];
-
             std::from_chars_result result = std::from_chars(
-                value.data(), value.data() + value.size(), window_size);
-
+                value.data(), value.data() + value.size(), options.window_size);
             if (result.ec != std::errc() || result.ptr != value.data() + value.size()) {
                 std::print(stderr, "--window-size: не число: {}\n", value);
-                return 2;
+                return false;
             }
         } else {
-            path = arg;
+            options.path = arg;
         }
     }
 
-    if (path.empty()) {
+    if (options.path.empty()) {
         std::print(stderr, "использование: nano-edr <журнал.log> [--quiet] [--window-size N]\n");
-        return 2;
+        return false;
+    }
+    return true;
+}
+
+void CountType(std::vector<std::pair<std::string, int>>& counts, const std::string& type) {
+    for (std::pair<std::string, int>& item : counts) {
+        if (item.first == type) {
+            ++item.second;
+            return;
+        }
+    }
+    counts.push_back({type, 1});
+}
+
+void PrintContext(const nano_edr::EventList& window) {
+    std::size_t skip = 0;
+    if (window.size > 2) {
+        skip = window.size - 2;
     }
 
-    std::ifstream log(path);
+    std::size_t index = 0;
+    for (const nano_edr::EventNode* it = window.head; it != nullptr; it = it->next) {
+        if (index >= skip) {
+            std::print("[CTX] -{}: ts={} type={} pid={}\n",
+                       window.size - index, it->event.ts, it->event.type, it->event.pid);
+        }
+        ++index;
+    }
+}
 
+void PrintSummary(long long events, const std::vector<std::pair<std::string, int>>& types) {
+    std::print("Общее число событий: {}\n", events);
+    for (const std::pair<std::string, int>& item : types) {
+        std::print("Тип: {}, Количество: {}\n", item.first, item.second);
+    }
+}
+
+int Run(const Options& options) {
+    std::ifstream log(options.path);
     if (!log) {
-        std::print(stderr, "не удалось открыть журнал: {}\n", path);
+        std::print(stderr, "не удалось открыть журнал: {}\n", options.path);
         return 2;
     }
-
-    long long lines = 0;
-    long long events = 0;
-    std::string line;
-
-    std::vector<std::string> signs;
-
-    signs.push_back("wscript.exe");
-    signs.push_back(".locked");
-    signs.push_back("certutil.exe");
-    signs.push_back("\\Startup\\");
-
-    std::vector<std::pair<std::string, int>> typeCount;
 
     nano_edr::EventList window;
-    window.capacity = window_size;
+    window.capacity = options.window_size;
+
+    long long events = 0;
+    std::vector<std::pair<std::string, int>> types;
+    std::string line;
 
     while (std::getline(log, line)) {
-
-        ++lines;
-
         if (nano_edr::IsBlankOrComment(&line)) {
             continue;
-        }
-
-        bool detected = false;
-        for (const std::string& war : signs) {
-            if (line.find(war) != std::string::npos) {
-                std::print("[DETECT] строка {}, признак {}: {}\n", lines, war, line);
-                detected = true;
-            }
-        }
-
-        if (detected && !quiet) {
-
-            std::size_t skip = 0;
-            if (window.size > 2) {
-                skip = window.size - 2;
-            }
-
-            std::size_t index = 0;
-            for (const nano_edr::EventNode* it = window.head; it != nullptr; it = it->next) {
-                if (index >= skip) {
-
-                    std::print("[CTX] -{}: ts={} type={} pid={}\n",
-                               window.size - index, it->event.ts, it->event.type, it->event.pid);
-                }
-                ++index;
-            }
         }
 
         nano_edr::Event event;
@@ -111,30 +110,34 @@ int main(int argc, char** argv) {
         }
 
         ++events;
+        CountType(types, event.type);
 
-        bool found_type = false;
-        for (std::pair<std::string, int>& p : typeCount) {
-            if (p.first == event.type) {
-                p.second += 1;
-                found_type = true;
-                break;
-            }
+        std::size_t detects =
+            nano_edr::CheckRules(event, nano_edr::AgentRules(), nano_edr::AgentRuleCount());
+        if (detects > 0 && !options.quiet) {
+            PrintContext(window);
         }
-        if (!found_type) {
-            typeCount.push_back({event.type, 1});
-        }
-        
+
         nano_edr::ListPushBack(&window, &event);
     }
 
-    if (!quiet) {
-
-        std::print("Общее число событий: {}\n", events);
-
-        for (const std::pair<std::string, int>& p : typeCount) {
-            std::print("Тип: {}, Количество: {}\n", p.first, p.second);
-        }
+    if (!options.quiet) {
+        PrintSummary(events, types);
     }
-
     return 0;
+}
+
+}
+
+int main(int argc, char** argv) {
+    try {
+        Options options;
+        if (!ParseArgs(argc, argv, options)) {
+            return 2;
+        }
+        return Run(options);
+    } catch (const std::exception& error) {
+        std::print(stderr, "прогон оборван: {}\n", error.what());
+        return 1;
+    }
 }
