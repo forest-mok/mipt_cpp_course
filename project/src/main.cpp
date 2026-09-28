@@ -1,58 +1,143 @@
-// Каркас агента: читает журнал событий построчно и считает строки.
-//
-// Это заготовка занятия 1.1, а не решение. Детектов она не ищет — их вы
-// добавите здесь же, в отмеченном месте ниже. Формат строки детекта, список
-// признаков и правило про их порядок заданы в постановке занятия: по ним
-// сравниваются эталоны.
-//
-// Весь код лежит в main, и на этом занятии так и надо: функции появятся
-// на занятии 1.2, ссылки — на 1.3. Разбор аргументов, коды возврата и флаг
-// --quiet — часть задания.
-//
-// Запуск:
-//   nano-edr <журнал.log>
+#include <charconv>
+#include <cstddef>
 #include <cstdio>
+#include <exception>
 #include <fstream>
 #include <print>
 #include <string>
+#include <utility>
+#include <vector>
 
-int main(int argc, char** argv) {
-    // Аргументы разбираются грубо: путь к журналу и ничего больше. Остальное,
-    // включая --quiet, добавляется по заданию.
-    if (argc < 2) {
-        std::print(stderr, "использование: nano-edr <журнал.log>\n");
-        return 2;
+#include "agent_rules.h"
+#include "event.h"
+#include "event_list.h"
+#include "parse.h"
+#include "rules.h"
+
+namespace {
+struct Options {
+    std::string path;
+    bool quiet = false;
+    std::size_t window_size = 64;
+};
+
+bool ParseArgs(int argc, char** argv, Options& options) {
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+
+        if (arg == "--quiet") {
+            options.quiet = true;
+        } else if (arg == "--window-size") {
+            if (i + 1 >= argc) {
+                std::print(stderr, "--window-size: не указано число\n");
+                return false;
+            }
+            ++i;
+            std::string value = argv[i];
+            std::from_chars_result result = std::from_chars(
+                value.data(), value.data() + value.size(), options.window_size);
+            if (result.ec != std::errc() || result.ptr != value.data() + value.size()) {
+                std::print(stderr, "--window-size: не число: {}\n", value);
+                return false;
+            }
+        } else {
+            options.path = arg;
+        }
     }
 
-    std::ifstream log(argv[1]);
+    if (options.path.empty()) {
+        std::print(stderr, "использование: nano-edr <журнал.log> [--quiet] [--window-size N]\n");
+        return false;
+    }
+    return true;
+}
+
+void CountType(std::vector<std::pair<std::string, int>>& counts, const std::string& type) {
+    for (std::pair<std::string, int>& item : counts) {
+        if (item.first == type) {
+            ++item.second;
+            return;
+        }
+    }
+    counts.push_back({type, 1});
+}
+
+void PrintContext(const nano_edr::EventList& window) {
+    std::size_t skip = 0;
+    if (window.size > 2) {
+        skip = window.size - 2;
+    }
+
+    std::size_t index = 0;
+    for (const nano_edr::EventNode* it = window.head; it != nullptr; it = it->next) {
+        if (index >= skip) {
+            std::print("[CTX] -{}: ts={} type={} pid={}\n",
+                       window.size - index, it->event.ts, it->event.type, it->event.pid);
+        }
+        ++index;
+    }
+}
+
+void PrintSummary(long long events, const std::vector<std::pair<std::string, int>>& types) {
+    std::print("Общее число событий: {}\n", events);
+    for (const std::pair<std::string, int>& item : types) {
+        std::print("Тип: {}, Количество: {}\n", item.first, item.second);
+    }
+}
+
+int Run(const Options& options) {
+    std::ifstream log(options.path);
     if (!log) {
-        std::print(stderr, "не удалось открыть журнал: {}\n", argv[1]);
+        std::print(stderr, "не удалось открыть журнал: {}\n", options.path);
         return 2;
     }
 
-    long long lines = 0;
-    long long comments = 0;
+    nano_edr::EventList window;
+    window.capacity = options.window_size;
+
+    long long events = 0;
+    std::vector<std::pair<std::string, int>> types;
     std::string line;
 
     while (std::getline(log, line)) {
-        // Счётчик увеличивается до всех проверок: он считает строки файла,
-        // а не события. Номер, посчитанный по событиям, бесполезен — по нему
-        // нельзя открыть файл и посмотреть.
-        ++lines;
-
-        // Строки-комментарии в журнале начинаются с '#'. Они не события,
-        // и детекта по ним быть не должно.
-        if (!line.empty() && line[0] == '#') {
-            ++comments;
+        if (nano_edr::IsBlankOrComment(&line)) {
             continue;
         }
 
-        // >>> Здесь начинается занятие 1.1.
-        //
-        // Проверка признаков и печать детекта. Номер строки, который нужен
-        // в выводе, — это lines.
+        nano_edr::Event event;
+        if (!nano_edr::ParseEventLine(&line, &event)) {
+            continue;
+        }
+
+        ++events;
+        CountType(types, event.type);
+
+        std::size_t detects =
+            nano_edr::CheckRules(event, nano_edr::AgentRules(), nano_edr::AgentRuleCount());
+        if (detects > 0 && !options.quiet) {
+            PrintContext(window);
+        }
+
+        nano_edr::ListPushBack(&window, &event);
     }
 
-    std::print("строк {}, из них комментариев {}\n", lines, comments);
+    if (!options.quiet) {
+        PrintSummary(events, types);
+    }
     return 0;
+}
+
+}
+
+int main(int argc, char** argv) {
+    try {
+        Options options;
+        if (!ParseArgs(argc, argv, options)) {
+            return 2;
+        }
+        return Run(options);
+    } catch (const std::exception& error) {
+        std::print(stderr, "прогон оборван: {}\n", error.what());
+        return 1;
+    }
 }
